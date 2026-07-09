@@ -36,7 +36,13 @@ class AnalysisConfig:
     export_png: bool = False       # 是否额外导出 PNG 截图（需要 kaleido，较慢）；默认只生成交互式 HTML
     annotate: bool = False         # 是否在图上叠加异常判定标注（峰值线/图例/结论文字）；默认干净视图
     freq_scale: str = "linear"     # 频率轴刻度：'linear' 或 'log'（log 更利于观察低频故障特征）
-    relative_db: bool = False      # True: 显示相对该文件自身峰值归一化的dB(峰值=0dB)；False: 绝对dBFS
+
+    # dB 显示基准（只影响图表显示，检测判定始终用绝对dBFS计算，不受此项影响）：
+    #   'noise_floor' (默认): 相对本底噪声(约10分位数)=0dB，异常峰显示为正数，最直观、类似SNR
+    #   'peak':               相对该文件自身峰值=0dB，其余为负
+    #   'dbfs':               绝对满量程基准，行业标准做法，但大多数读数是负数
+    db_mode: str = "noise_floor"
+    noise_floor_percentile: float = 10.0  # noise_floor 模式下，用第几分位数代表“本底”
 
     # ---- 3D 显示平滑（仅影响 3D 曲面外观，检测和 2D 复核图仍用全分辨率数据）----
     smooth_display: bool = True    # True: 按频带/时间块做能量域平均聚合（平滑）；False: 原始抽稀（毛躁但原汁原味）

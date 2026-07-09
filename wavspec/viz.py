@@ -112,14 +112,27 @@ def _robust_color_range(db: np.ndarray) -> tuple[float, float]:
     return lo, hi
 
 
-def _display_matrix(spec: Spectrogram, cfg: AnalysisConfig) -> tuple[np.ndarray, float]:
-    """按 cfg.relative_db 决定是否把 dB 平移成“相对该文件自身峰值”。
+def _compute_shift(spec: Spectrogram, cfg: AnalysisConfig) -> float:
+    """按 cfg.db_mode 决定图表 dB 的显示基准（平移量）。
 
-    检测逻辑(detect.py)永远在原始绝对 dB 上进行，不受这里影响；
-    这个平移只用于图表显示，让人一眼看出峰值相对量级，不跨文件比较绝对电平。
+    检测逻辑(detect.py)永远在原始绝对 dBFS 上进行，不受这里影响；
+    这里的平移只改变图表怎么显示同一份数据，不改变数据本身。
+
+    - 'noise_floor': 减去本底噪声(默认第10分位数)，本底≈0dB，异常峰显示为正数，
+      类似"信号比本底噪声高多少"(SNR)，最直观，默认模式。
+    - 'peak': 减去该文件自身最大值，峰值=0dB，其余为负。
+    - 'dbfs': 不平移，绝对满量程基准，行业标准但大多数读数是负数。
+
+    注意：平移必须在功率域聚合/平滑(_aggregate_for_display)【之后】应用在最终
+    显示值上，而不是提前平移原始 dB 再聚合——提前平移会让聚合函数内部的绝对
+    floor_db 数值安全下限失去意义（比较的量纲不对，虽不会报错但逻辑不干净）。
     """
-    shift = float(spec.db.max()) if cfg.relative_db else 0.0
-    return spec.db - shift, shift
+    if cfg.db_mode == "peak":
+        return float(spec.db.max())
+    elif cfg.db_mode == "dbfs":
+        return 0.0
+    else:  # noise_floor (默认)
+        return float(np.percentile(spec.db, cfg.noise_floor_percentile))
 
 
 def _freq_mask(freqs: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
@@ -129,15 +142,26 @@ def _freq_mask(freqs: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
     return np.ones_like(freqs, dtype=bool)
 
 
+_DB_MODE_LABEL = {
+    "noise_floor": "dB, 相对本底噪声",
+    "peak": "dB, 相对峰值",
+    "dbfs": "dB",
+}
+
+
+def _colorbar_title(cfg: AnalysisConfig) -> str:
+    return _DB_MODE_LABEL[cfg.db_mode]
+
+
 def _db_axis_title(cfg: AnalysisConfig) -> str:
-    return "幅值 Amplitude (dB, 相对峰值)" if cfg.relative_db else "幅值 Amplitude (dB)"
+    return f"幅值 Amplitude ({_DB_MODE_LABEL[cfg.db_mode]})"
 
 
 def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: AnalysisConfig) -> go.Figure:
-    db_display, shift = _display_matrix(spec, cfg)
+    shift = _compute_shift(spec, cfg)
     fmask = _freq_mask(spec.freqs, cfg)
     freqs_masked = spec.freqs[fmask]
-    db_masked = db_display[fmask, :]
+    db_masked = spec.db[fmask, :]  # 绝对dB，聚合/平滑安全；平移放最后应用
 
     if cfg.smooth_display:
         # 能量域块平均聚合：平滑、能量守恒（参考图的平滑来源）
@@ -150,11 +174,13 @@ def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
         times_ds = spec.times[t_idx]
         db_ds = db_masked[np.ix_(f_idx, t_idx)]  # shape (F_ds, T_ds)
 
+    db_ds = db_ds - shift  # 聚合完成后再平移到目标显示基准
+
     verdict_color = {"OK": "#2ecc71", "SUSPECT": "#f39c12", "ABNORMAL": "#e74c3c"}[det.verdict]
     verdict_label = {"OK": "OK - 未见明显异常", "SUSPECT": "疑似异常", "ABNORMAL": "异常"}[det.verdict]
 
     cmin, cmax = _robust_color_range(db_ds)
-    db_title = "dB (相对峰值)" if cfg.relative_db else "dB"
+    db_title = _colorbar_title(cfg)
     surface = go.Surface(
         x=freqs_ds,
         y=times_ds,
@@ -269,13 +295,13 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
         subplot_titles=("时频热力图 (俯视)", "平均谱 (中位数压缩)"),
     )
 
-    db_display, shift = _display_matrix(spec, cfg)
+    shift = _compute_shift(spec, cfg)
     fmask = _freq_mask(spec.freqs, cfg)
     freqs_masked = spec.freqs[fmask]
-    db_masked = db_display[fmask, :]
+    db_masked = spec.db[fmask, :] - shift
 
     cmin, cmax = _robust_color_range(db_masked)
-    db_title = "dB (相对峰值)" if cfg.relative_db else "dB"
+    db_title = _colorbar_title(cfg)
     fig.add_trace(
         go.Heatmap(
             x=freqs_masked,

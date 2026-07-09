@@ -11,3 +11,4 @@ examples/
 .playwright-mcp/
 .claude/
 .idea/
+wavspec_build_package.zip

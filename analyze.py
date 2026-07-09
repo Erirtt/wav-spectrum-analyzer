@@ -13,8 +13,12 @@
   # 自定义 FFT 参数 / 关心频段
   python3 analyze.py samples/ --n-fft 8192 --overlap 0.5 --fmax 5000
 
-  # 频率轴对数刻度(便于观察低频故障特征) + 幅值相对峰值归一化显示
-  python3 analyze.py samples/ --freq-scale log --relative
+  # 频率轴对数刻度(便于观察低频故障特征)；幅值默认已是"相对本底噪声"(本底≈0dB，异常峰为正数)
+  python3 analyze.py samples/ --freq-scale log
+
+  # 切换幅值显示基准: --dbfs(绝对满量程) 或 --relative(相对该文件峰值)
+  python3 analyze.py samples/ --dbfs
+  python3 analyze.py samples/ --relative
 
   # 额外导出 PNG 截图 / 在图上叠加异常判定标注（默认只生成干净的交互式 HTML）
   python3 analyze.py samples/ --png --annotate
@@ -61,10 +65,16 @@ def parse_args() -> argparse.Namespace:
         "--freq-scale", choices=["linear", "log"], default="linear",
         help="频率轴刻度（默认 linear）。log 会把低频段（常见故障特征频率集中区）拉宽显示，高频段相应压缩",
     )
-    p.add_argument(
-        "--relative", action="store_true",
-        help="幅值显示相对该文件自身峰值归一化(峰值=0dB)，而非绝对dBFS；仅影响图表显示，不影响检测判定",
+    db_group = p.add_mutually_exclusive_group()
+    db_group.add_argument(
+        "--dbfs", action="store_const", dest="db_mode", const="dbfs",
+        help="幅值显示为绝对满量程基准(dBFS)，行业标准做法，但大多数读数是负数",
     )
+    db_group.add_argument(
+        "--relative", action="store_const", dest="db_mode", const="peak",
+        help="幅值显示相对该文件自身峰值归一化(峰值=0dB)，其余为负",
+    )
+    p.set_defaults(db_mode="noise_floor")  # 默认: 相对本底噪声，本底≈0dB，异常峰为正数
     p.add_argument(
         "--no-smooth", action="store_true",
         help="关闭 3D 曲面的平滑聚合，显示原始抽稀数据（毛躁但未经加工）；检测始终用全分辨率数据，不受此项影响",
@@ -88,7 +98,7 @@ def build_config(args: argparse.Namespace) -> AnalysisConfig:
         band_count=args.band_count,
         export_png=args.png,
         freq_scale=args.freq_scale,
-        relative_db=args.relative,
+        db_mode=args.db_mode,
         smooth_display=not args.no_smooth,
         annotate=args.annotate,
     )
