@@ -1,0 +1,359 @@
+"""3D 瀑布图 + 2D 辅助图渲染。
+
+3D 曲面: x=频率(Hz) y=时间(s) z=幅值(dB)。
+提供 俯视/正面/侧面/斜上 四个相机视角预设，交互式 HTML 中仍可自由旋转缩放。
+"""
+from __future__ import annotations
+from pathlib import Path
+
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.ndimage import gaussian_filter
+
+from .config import AnalysisConfig
+from .dsp import Spectrogram, mean_spectrum
+from .detect import DetectionResult
+from .io_utils import WavData
+
+# 相机视角预设（Plotly scene.camera.eye，单位为场景坐标的相对方向）。
+# 注意：正交投影(orthographic)在浏览器 WebGL 中通过 relayout 动态切换时，
+# Plotly.js 存在渲染 bug（曲面消失、刻度错乱），因此统一使用透视投影 + 较远
+# 的观察距离来 近似 得到干净的俯视/正面/侧面效果。3D 图仅用于直觉展示，
+# 精确读数以 2D 热力图/平均谱为准（见 build_2d_figure）。
+CAMERA_PRESETS = {
+    "斜上(默认)": dict(eye=dict(x=1.6, y=-1.6, z=1.2)),
+    "俯视": dict(eye=dict(x=0.0001, y=0.0, z=3.6), up=dict(x=0, y=1, z=0)),
+    "正面(沿时间轴看频率-幅值)": dict(eye=dict(x=0.0, y=-3.6, z=0.0001)),
+    "侧面(沿频率轴看时间-幅值)": dict(eye=dict(x=3.6, y=0.0, z=0.0001)),
+}
+
+# 暗色主题配色
+BG_COLOR = "#0d0e14"
+PANEL_COLOR = "#12131c"
+GRID_COLOR = "#333747"
+TEXT_COLOR = "#e6e6ef"
+MUTED_TEXT = "#9a9db0"
+
+DARK_SCENE_AXIS = dict(
+    backgroundcolor=PANEL_COLOR,
+    gridcolor=GRID_COLOR,
+    zerolinecolor=GRID_COLOR,
+    showbackground=True,
+    color=TEXT_COLOR,
+)
+
+
+def _downsample_grid(n: int, max_n: int) -> np.ndarray:
+    """返回长度不超过 max_n 的抽稀索引（均匀间隔），用于渲染前的降采样。"""
+    if n <= max_n:
+        return np.arange(n)
+    return np.linspace(0, n - 1, max_n).astype(int)
+
+
+def _aggregate_for_display(
+    freqs: np.ndarray, times: np.ndarray, db: np.ndarray, cfg: AnalysisConfig
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """把全分辨率 STFT 网格聚合成粗显示网格（线性功率域块平均，能量守恒）。
+
+    抽稀(每隔N取1)会随机采到噪声尖刺，曲面显得毛躁；块平均把每个显示单元内
+    所有 bin 的能量平均，既平滑又保持局部能量真实——这正是参考图(粗网格~128带)
+    平滑外观的来源。仅用于 3D 显示，检测和 2D 复核图仍使用全分辨率数据。
+    """
+    power = 10.0 ** (db / 10.0)  # db=20log10(mag) -> 功率域 mag²=10^(db/10)
+
+    # 时间方向：均匀分块平均
+    nt = min(cfg.display_time_bins, len(times))
+    t_edges = np.linspace(0, len(times), nt + 1).astype(int)
+    p_t = np.empty((power.shape[0], nt))
+    times_d = np.empty(nt)
+    for j in range(nt):
+        lo, hi = t_edges[j], max(t_edges[j + 1], t_edges[j] + 1)
+        p_t[:, j] = power[:, lo:hi].mean(axis=1)
+        times_d[j] = times[lo:hi].mean()
+
+    # 频率方向：linear 均匀分带 / log 等比分带（与显示轴刻度一致，log 下低频更密）
+    nf = min(cfg.display_freq_bins, len(freqs))
+    if cfg.freq_scale == "log":
+        f_edges = np.geomspace(freqs[0], freqs[-1], nf + 1)
+        centers = np.sqrt(f_edges[:-1] * f_edges[1:])  # 几何中心
+    else:
+        f_edges = np.linspace(freqs[0], freqs[-1], nf + 1)
+        centers = (f_edges[:-1] + f_edges[1:]) / 2.0
+
+    band_idx = np.clip(np.searchsorted(f_edges, freqs, side="right") - 1, 0, nf - 1)
+    p_ft = np.zeros((nf, nt))
+    counts = np.bincount(band_idx, minlength=nf).astype(float)
+    np.add.at(p_ft, band_idx, p_t)
+    empty = counts == 0
+    p_ft[~empty] /= counts[~empty, None]
+    if empty.any():
+        # log 分带在低频端可能窄于一个 bin 而落空：用最近的原始 bin 填充
+        nearest = np.searchsorted(freqs, centers[empty])
+        nearest = np.clip(nearest, 0, len(freqs) - 1)
+        p_ft[empty] = p_t[nearest]
+
+    floor_p = 10.0 ** (cfg.floor_db / 10.0)
+    db_d = 10.0 * np.log10(np.maximum(p_ft, floor_p))
+    if cfg.smooth_sigma > 0:
+        db_d = gaussian_filter(db_d, sigma=cfg.smooth_sigma)
+    return centers, times_d, db_d
+
+
+def _robust_color_range(db: np.ndarray) -> tuple[float, float]:
+    """按分位数而非绝对 min/max 设定色带范围。
+
+    极少数 bin 会被数值下限(floor_db)夹住，若用真实 min/max 设色带，
+    这些离群点会把色带拉得很宽，压缩真正有信息量的区间的对比度，
+    视觉上显得动态范围被“夸大”。用 1%~100% 分位数更贴近实际数据分布。
+    """
+    lo = float(np.percentile(db, 1))
+    hi = float(np.max(db))
+    return lo, hi
+
+
+def _display_matrix(spec: Spectrogram, cfg: AnalysisConfig) -> tuple[np.ndarray, float]:
+    """按 cfg.relative_db 决定是否把 dB 平移成“相对该文件自身峰值”。
+
+    检测逻辑(detect.py)永远在原始绝对 dB 上进行，不受这里影响；
+    这个平移只用于图表显示，让人一眼看出峰值相对量级，不跨文件比较绝对电平。
+    """
+    shift = float(spec.db.max()) if cfg.relative_db else 0.0
+    return spec.db - shift, shift
+
+
+def _freq_mask(freqs: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
+    """对数频率轴不能显示 0Hz，这里把 DC bin 过滤掉。"""
+    if cfg.freq_scale == "log":
+        return freqs > 0
+    return np.ones_like(freqs, dtype=bool)
+
+
+def _db_axis_title(cfg: AnalysisConfig) -> str:
+    return "幅值 Amplitude (dB, 相对峰值)" if cfg.relative_db else "幅值 Amplitude (dB)"
+
+
+def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: AnalysisConfig) -> go.Figure:
+    db_display, shift = _display_matrix(spec, cfg)
+    fmask = _freq_mask(spec.freqs, cfg)
+    freqs_masked = spec.freqs[fmask]
+    db_masked = db_display[fmask, :]
+
+    if cfg.smooth_display:
+        # 能量域块平均聚合：平滑、能量守恒（参考图的平滑来源）
+        freqs_ds, times_ds, db_ds = _aggregate_for_display(freqs_masked, spec.times, db_masked, cfg)
+    else:
+        # 原始抽稀：保留每个被选中 bin 的原值，毛躁但无任何加工
+        f_idx = _downsample_grid(len(freqs_masked), cfg.max_grid_freq)
+        t_idx = _downsample_grid(len(spec.times), cfg.max_grid_time)
+        freqs_ds = freqs_masked[f_idx]
+        times_ds = spec.times[t_idx]
+        db_ds = db_masked[np.ix_(f_idx, t_idx)]  # shape (F_ds, T_ds)
+
+    verdict_color = {"OK": "#2ecc71", "SUSPECT": "#f39c12", "ABNORMAL": "#e74c3c"}[det.verdict]
+    verdict_label = {"OK": "OK - 未见明显异常", "SUSPECT": "疑似异常", "ABNORMAL": "异常"}[det.verdict]
+
+    cmin, cmax = _robust_color_range(db_ds)
+    db_title = "dB (相对峰值)" if cfg.relative_db else "dB"
+    surface = go.Surface(
+        x=freqs_ds,
+        y=times_ds,
+        z=db_ds.T,  # z 需要 shape (len(y), len(x)) = (T_ds, F_ds)
+        colorscale=cfg.colorscale,
+        cmin=cmin,
+        cmax=cmax,
+        colorbar=dict(title=db_title, x=1.02, tickfont=dict(color=TEXT_COLOR), title_font=dict(color=TEXT_COLOR)),
+        contours=dict(z=dict(show=False)),
+        # 绸缎质感光照：环境光防止暗部死黑，适度高光让脊线有丝绸反光
+        lighting=dict(ambient=0.55, diffuse=0.75, specular=0.35, roughness=0.6, fresnel=0.15),
+        lightposition=dict(x=-2000, y=1500, z=3000),
+    )
+
+    fig = go.Figure(data=[surface])
+
+    # 标注（可选）：在最高的若干个峰位置画竖线标记；默认关闭保持干净视图
+    if cfg.annotate:
+        for p in det.peaks[:5]:
+            color = "#ff2d2d" if p.severity == "abnormal" else "#ffb020"
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[p.freq_hz, p.freq_hz],
+                    y=[times_ds[0], times_ds[-1]],
+                    z=[p.level_db - shift, p.level_db - shift],
+                    mode="lines",
+                    line=dict(color=color, width=4, dash="dash"),
+                    name=f"{p.freq_hz:.0f}Hz ({'异常' if p.severity=='abnormal' else '疑似'})",
+                    showlegend=True,
+                )
+            )
+
+    n_samples_str = f"{wav.n_samples:,} 点 @ {wav.fs:,} Hz, {wav.duration_s:.2f}s, {wav.n_channels}声道"
+    # 固定拆成多行，避免长结论文字自动换行时与视角按钮重叠；
+    # 文件名过长(真实传感器导出常见)时在标题里截断，完整文件名见报告表格/HTML<title>
+    display_name = wav.path.name if len(wav.path.name) <= 48 else wav.path.name[:30] + "…" + wav.path.name[-12:]
+    if cfg.annotate:
+        title_text = (
+            f"<b style='color:{TEXT_COLOR}'>{display_name}</b>  "
+            f"<span style='color:{verdict_color}'>[{verdict_label}]</span><br>"
+            f"<sup style='color:{MUTED_TEXT}'>{n_samples_str} | FFT={cfg.n_fft} 重叠={cfg.overlap:.0%}</sup><br>"
+            f"<sup style='color:{MUTED_TEXT}'>{det.summary}</sup>"
+        )
+    else:
+        # 干净视图：只保留文件名和采样信息，不显示判定结论
+        title_text = (
+            f"<b style='color:{TEXT_COLOR}'>{display_name}</b><br>"
+            f"<sup style='color:{MUTED_TEXT}'>{n_samples_str} | FFT={cfg.n_fft} 重叠={cfg.overlap:.0%}</sup>"
+        )
+
+    # 干净视图标题只有两行，场景可以占据更大面积
+    scene_top = 0.82 if cfg.annotate else 0.90
+    top_margin = 170 if cfg.annotate else 120
+    fig.update_layout(
+        height=850,
+        paper_bgcolor=BG_COLOR,
+        plot_bgcolor=BG_COLOR,
+        font=dict(color=TEXT_COLOR),
+        title=dict(text=title_text, x=0.02, xanchor="left", y=0.90 if cfg.annotate else 0.94, yanchor="top"),
+        scene=dict(
+            xaxis=dict(title="频率 Frequency (Hz)", type=cfg.freq_scale, **DARK_SCENE_AXIS),
+            yaxis=dict(title="时间 Time (s)", **DARK_SCENE_AXIS),
+            zaxis=dict(title=_db_axis_title(cfg), **DARK_SCENE_AXIS),
+            camera=CAMERA_PRESETS["斜上(默认)"],
+            # “平铺地毯”比例：频率轴拉长、幅值轴压扁（参考图风格），
+            # 立方体比例会把幅值抖动在视觉上放大，显得拥挤
+            aspectmode="manual",
+            aspectratio=dict(x=cfg.aspect_freq, y=cfg.aspect_time, z=cfg.aspect_db),
+            domain=dict(x=[0, 1], y=[0, scene_top]),
+        ),
+        margin=dict(l=0, r=0, t=top_margin, b=0),
+        legend=dict(x=0.75, y=0.80, bgcolor="rgba(20,21,32,0.75)", font=dict(color=TEXT_COLOR)),
+    )
+
+    # 视角切换按钮：固定在最顶部一行，标题另起在按钮下方，避免长结论文字重叠
+    buttons = [
+        dict(
+            label=name,
+            method="relayout",
+            args=[{"scene.camera": preset}],
+        )
+        for name, preset in CAMERA_PRESETS.items()
+    ]
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="right",
+                buttons=buttons,
+                x=0.02,
+                y=1.0,
+                xanchor="left",
+                yanchor="top",
+                showactive=True,
+                bgcolor=PANEL_COLOR,
+                bordercolor=GRID_COLOR,
+                font=dict(color=TEXT_COLOR),
+                active=0,
+            )
+        ]
+    )
+
+    return fig
+
+
+def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: AnalysisConfig) -> go.Figure:
+    """俯视热力图 + 平均谱曲线，用于量化复核（3D 图仅做直觉展示）。"""
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        column_widths=[0.62, 0.38],
+        subplot_titles=("时频热力图 (俯视)", "平均谱 (中位数压缩)"),
+    )
+
+    db_display, shift = _display_matrix(spec, cfg)
+    fmask = _freq_mask(spec.freqs, cfg)
+    freqs_masked = spec.freqs[fmask]
+    db_masked = db_display[fmask, :]
+
+    cmin, cmax = _robust_color_range(db_masked)
+    db_title = "dB (相对峰值)" if cfg.relative_db else "dB"
+    fig.add_trace(
+        go.Heatmap(
+            x=freqs_masked,
+            y=spec.times,
+            z=db_masked.T,
+            colorscale=cfg.colorscale,
+            zmin=cmin,
+            zmax=cmax,
+            colorbar=dict(title=db_title, x=0.58, tickfont=dict(color=TEXT_COLOR), title_font=dict(color=TEXT_COLOR)),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(title_text="频率 (Hz)", type=cfg.freq_scale, row=1, col=1)
+    fig.update_yaxes(title_text="时间 (s)", row=1, col=1)
+
+    spectrum_db = mean_spectrum(spec, method="median")[fmask] - shift
+    fig.add_trace(
+        go.Scatter(x=freqs_masked, y=spectrum_db, mode="lines", name="平均谱", line=dict(color="#7dd3fc")),
+        row=1,
+        col=2,
+    )
+    if cfg.annotate:
+        for p in det.peaks:
+            color = "#ff5c5c" if p.severity == "abnormal" else "#ffb020"
+            fig.add_trace(
+                go.Scatter(
+                    x=[p.freq_hz],
+                    y=[p.level_db - shift],
+                    mode="markers+text",
+                    marker=dict(color=color, size=9, symbol="triangle-down"),
+                    text=[f"{p.freq_hz:.0f}Hz"],
+                    textposition="top center",
+                    textfont=dict(color=TEXT_COLOR),
+                    showlegend=False,
+                ),
+                row=1,
+                col=2,
+            )
+    fig.update_xaxes(title_text="频率 (Hz)", type=cfg.freq_scale, row=1, col=2)
+    fig.update_yaxes(title_text=_db_axis_title(cfg).replace("Amplitude ", ""), row=1, col=2)
+
+    fig.update_layout(
+        title=dict(text=f"{wav.path.name} - 2D 复核视图", font=dict(color=TEXT_COLOR)),
+        paper_bgcolor=BG_COLOR,
+        plot_bgcolor=PANEL_COLOR,
+        font=dict(color=TEXT_COLOR),
+        margin=dict(l=10, r=10, t=60, b=10),
+        showlegend=False,
+    )
+    fig.update_xaxes(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR, color=TEXT_COLOR)
+    fig.update_yaxes(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR, color=TEXT_COLOR)
+    fig.update_annotations(font=dict(color=TEXT_COLOR))  # subplot_titles
+    return fig
+
+
+def save_figures(fig3d: go.Figure, fig2d: go.Figure | None, out_dir: Path, stem: str, export_png: bool) -> dict:
+    """保存交互式 HTML(3D)，可选导出 PNG(3D/2D)，返回相对文件名字典供报告引用。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+
+    html_name = f"{stem}_3d.html"
+    # 完整内嵌 plotly.js（而非 CDN），保证在完全断网的电脑上也能双击打开
+    fig3d.write_html(str(out_dir / html_name), include_plotlyjs=True)
+    paths["html_3d"] = html_name
+
+    if export_png:
+        try:
+            png3d = f"{stem}_3d.png"
+            fig3d.write_image(str(out_dir / png3d), width=1200, height=800, scale=2)
+            paths["png_3d"] = png3d
+
+            if fig2d is not None:
+                png2d = f"{stem}_2d.png"
+                fig2d.write_image(str(out_dir / png2d), width=1400, height=600, scale=2)
+                paths["png_2d"] = png2d
+        except Exception as e:
+            # kaleido 缺失或渲染失败时不阻断整体流程，仅跳过 PNG 导出
+            paths["png_error"] = str(e)
+
+    return paths

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+build/
+dist/
+*.spec
+out/
+out_real/
+examples/
+频谱分析结果/
+.playwright-mcp/
+.claude/
+.idea/
