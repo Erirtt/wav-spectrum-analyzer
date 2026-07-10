@@ -448,7 +448,11 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
 
 
 def save_figures(fig3d: go.Figure, fig2d: go.Figure | None, out_dir: Path, stem: str, export_png: bool) -> dict:
-    """保存交互式 HTML(3D)，可选导出 PNG(3D/2D)，返回相对文件名字典供报告引用。"""
+    """保存交互式 HTML(3D+2D)，可选额外导出 PNG，返回相对文件名字典供报告引用。
+
+    2D 复核图现在总是生成 HTML（write_html 很快，不依赖 kaleido），
+    只有 PNG 截图才需要 kaleido、才受 export_png 开关控制。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
 
@@ -456,6 +460,11 @@ def save_figures(fig3d: go.Figure, fig2d: go.Figure | None, out_dir: Path, stem:
     # 完整内嵌 plotly.js（而非 CDN），保证在完全断网的电脑上也能双击打开
     fig3d.write_html(str(out_dir / html_name), include_plotlyjs=True)
     paths["html_3d"] = html_name
+
+    if fig2d is not None:
+        html2d_name = f"{stem}_2d.html"
+        fig2d.write_html(str(out_dir / html2d_name), include_plotlyjs=True)
+        paths["html_2d"] = html2d_name
 
     if export_png:
         try:

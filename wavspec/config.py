@@ -39,7 +39,7 @@ class AnalysisConfig:
     #   'linear': 线性，全频段真实宽度
     #   'log':    对数，低频段拉宽（常见故障特征频率集中区）
     #   'mel':    梅尔刻度（人耳感知），显示层分带即为梅尔频谱，低频分辨率高、高频压缩
-    freq_scale: str = "linear"
+    freq_scale: str = "mel"  # 默认梅尔刻度
 
     # dB 显示基准（只影响图表显示，检测判定始终用绝对dBFS计算，不受此项影响）：
     #   'noise_floor' (默认): 相对本底噪声(约10分位数)=0dB，异常峰显示为正数，最直观、类似SNR

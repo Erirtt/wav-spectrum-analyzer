@@ -23,7 +23,7 @@ jobs:
 
       - name: Build exe
         run: |
-          pyinstaller --onefile --windowed --name WavSpectrumAnalyzer `
+          pyinstaller --onedir --windowed --name WavSpectrumAnalyzer `
             --collect-all soundfile `
             --collect-all plotly `
             --collect-submodules scipy `
@@ -33,4 +33,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: WavSpectrumAnalyzer-windows
-          path: dist/WavSpectrumAnalyzer.exe
+          path: dist/WavSpectrumAnalyzer/

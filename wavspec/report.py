@@ -31,8 +31,11 @@ def render_html_report(entries: list[FileReportEntry], cfg: AnalysisConfig, out_
             if thumb
             else f'<a href="{e.fig_paths["html_3d"]}">打开交互式 3D 图</a>'
         )
+        links = [thumb_html]
+        if e.fig_paths.get("html_2d"):
+            links.append(f'<a href="{e.fig_paths["html_2d"]}">2D 复核图</a>')
         file_cell = f"""
-          <td>{thumb_html}</td>
+          <td>{"<br>".join(links)}</td>
           <td><b>{e.wav.path.name}</b><br>
               <span class="meta">{e.wav.fs:,} Hz · {e.wav.n_samples:,} 点 · {e.wav.duration_s:.2f}s · {e.wav.n_channels}声道</span>
           </td>"""

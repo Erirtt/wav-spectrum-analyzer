@@ -62,9 +62,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--annotate", action="store_true", help="在图上叠加异常判定标注（峰值线/图例/结论文字；默认干净视图，判定结论只打印到终端）")
 
     p.add_argument(
-        "--freq-scale", choices=["linear", "log", "mel"], default="linear",
-        help="频率轴刻度（默认 linear）。log: 对数轴，低频段拉宽；"
-             "mel: 梅尔刻度（人耳感知），显示层分带即为梅尔频谱。均只影响显示，检测始终用全分辨率线性频率",
+        "--freq-scale", choices=["linear", "log", "mel"], default="mel",
+        help="频率轴刻度（默认 mel，人耳感知刻度）。log: 对数轴；linear: 线性轴。"
+             "均只影响显示，检测始终用全分辨率线性频率",
     )
     db_group = p.add_mutually_exclusive_group()
     db_group.add_argument(
@@ -140,8 +140,7 @@ def process_one(path: Path, cfg: AnalysisConfig, out_dir: Path) -> FileReportEnt
     print(f"  结论: [{det.verdict}] {det.summary}")
 
     fig3d = build_3d_figure(wav, spec, det, cfg)
-    # 2D 复核图仅在导出 PNG 时需要（HTML 模式下只保留交互式 3D）
-    fig2d = build_2d_figure(wav, spec, det, cfg) if cfg.export_png else None
+    fig2d = build_2d_figure(wav, spec, det, cfg)
     fig_paths = save_figures(fig3d, fig2d, out_dir, stem=path.stem, export_png=cfg.export_png)
 
     if fig_paths.get("png_error"):
