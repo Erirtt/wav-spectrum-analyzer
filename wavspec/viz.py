@@ -44,6 +44,15 @@ DARK_SCENE_AXIS = dict(
 )
 
 
+def _hz_to_mel(f):
+    """Hz -> Mel（O'Shaughnessy 公式，librosa 同款 htk 风格）。"""
+    return 2595.0 * np.log10(1.0 + np.asarray(f, dtype=float) / 700.0)
+
+
+def _mel_to_hz(m):
+    return 700.0 * (10.0 ** (np.asarray(m, dtype=float) / 2595.0) - 1.0)
+
+
 def _downsample_grid(n: int, max_n: int) -> np.ndarray:
     """返回长度不超过 max_n 的抽稀索引（均匀间隔），用于渲染前的降采样。"""
     if n <= max_n:
@@ -72,11 +81,16 @@ def _aggregate_for_display(
         p_t[:, j] = power[:, lo:hi].mean(axis=1)
         times_d[j] = times[lo:hi].mean()
 
-    # 频率方向：linear 均匀分带 / log 等比分带（与显示轴刻度一致，log 下低频更密）
+    # 频率方向分带（与显示轴刻度一致）：
+    #   linear 均匀分带 / log 等比分带 / mel 梅尔等间隔分带（即梅尔频谱的三角滤波器组中心思路）
     nf = min(cfg.display_freq_bins, len(freqs))
     if cfg.freq_scale == "log":
         f_edges = np.geomspace(freqs[0], freqs[-1], nf + 1)
         centers = np.sqrt(f_edges[:-1] * f_edges[1:])  # 几何中心
+    elif cfg.freq_scale == "mel":
+        mel_edges = np.linspace(_hz_to_mel(freqs[0]), _hz_to_mel(freqs[-1]), nf + 1)
+        f_edges = _mel_to_hz(mel_edges)
+        centers = _mel_to_hz((mel_edges[:-1] + mel_edges[1:]) / 2.0)  # 梅尔域中心
     else:
         f_edges = np.linspace(freqs[0], freqs[-1], nf + 1)
         centers = (f_edges[:-1] + f_edges[1:]) / 2.0
@@ -136,10 +150,33 @@ def _compute_shift(spec: Spectrogram, cfg: AnalysisConfig) -> float:
 
 
 def _freq_mask(freqs: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
-    """对数频率轴不能显示 0Hz，这里把 DC bin 过滤掉。"""
+    """对数频率轴不能显示 0Hz，这里把 DC bin 过滤掉。mel(0)=0 合法，无需过滤。"""
     if cfg.freq_scale == "log":
         return freqs > 0
     return np.ones_like(freqs, dtype=bool)
+
+
+def _x_coords(freqs_hz: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
+    """频率 -> 图表 x 坐标。mel 模式画在梅尔域（等间隔），其余直接用 Hz。"""
+    if cfg.freq_scale == "mel":
+        return _hz_to_mel(freqs_hz)
+    return freqs_hz
+
+
+def _freq_axis_opts(cfg: AnalysisConfig, f_lo: float, f_hi: float) -> dict:
+    """频率轴配置。Plotly 无原生 mel 轴：mel 模式下 x 坐标是梅尔值，
+    刻度位置取整数 Hz 的梅尔坐标、标签显示 Hz，读图体验与真实 mel 轴一致。"""
+    if cfg.freq_scale == "mel":
+        candidates = [0, 50, 100, 200, 500, 1000, 2000, 4000, 8000, 16000, 20000]
+        ticks = [f for f in candidates if f_lo <= f <= f_hi]
+        labels = [f"{f/1000:g}k" if f >= 1000 else str(f) for f in ticks]
+        return dict(
+            title="频率 Frequency (Hz, Mel刻度)",
+            type="linear",
+            tickvals=_hz_to_mel(np.array(ticks, dtype=float)).tolist(),
+            ticktext=labels,
+        )
+    return dict(title="频率 Frequency (Hz)", type=cfg.freq_scale)
 
 
 _DB_MODE_LABEL = {
@@ -182,7 +219,7 @@ def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
     cmin, cmax = _robust_color_range(db_ds)
     db_title = _colorbar_title(cfg)
     surface = go.Surface(
-        x=freqs_ds,
+        x=_x_coords(freqs_ds, cfg),
         y=times_ds,
         z=db_ds.T,  # z 需要 shape (len(y), len(x)) = (T_ds, F_ds)
         colorscale=cfg.colorscale,
@@ -201,9 +238,10 @@ def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
     if cfg.annotate:
         for p in det.peaks[:5]:
             color = "#ff2d2d" if p.severity == "abnormal" else "#ffb020"
+            px = float(_x_coords(np.array([p.freq_hz]), cfg)[0])
             fig.add_trace(
                 go.Scatter3d(
-                    x=[p.freq_hz, p.freq_hz],
+                    x=[px, px],
                     y=[times_ds[0], times_ds[-1]],
                     z=[p.level_db - shift, p.level_db - shift],
                     mode="lines",
@@ -241,7 +279,7 @@ def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
         font=dict(color=TEXT_COLOR),
         title=dict(text=title_text, x=0.02, xanchor="left", y=0.90 if cfg.annotate else 0.94, yanchor="top"),
         scene=dict(
-            xaxis=dict(title="频率 Frequency (Hz)", type=cfg.freq_scale, **DARK_SCENE_AXIS),
+            xaxis=dict(**_freq_axis_opts(cfg, float(freqs_masked[0]), float(freqs_masked[-1])), **DARK_SCENE_AXIS),
             yaxis=dict(title="时间 Time (s)", **DARK_SCENE_AXIS),
             zaxis=dict(title=_db_axis_title(cfg), **DARK_SCENE_AXIS),
             camera=CAMERA_PRESETS["斜上(默认)"],
@@ -302,9 +340,12 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
 
     cmin, cmax = _robust_color_range(db_masked)
     db_title = _colorbar_title(cfg)
+    x_masked = _x_coords(freqs_masked, cfg)
+    ax_opts = _freq_axis_opts(cfg, float(freqs_masked[0]), float(freqs_masked[-1]))
+    ax_opts["title_text"] = ax_opts.pop("title").replace("Frequency ", "")  # 2D 图轴标题紧凑些
     fig.add_trace(
         go.Heatmap(
-            x=freqs_masked,
+            x=x_masked,
             y=spec.times,
             z=db_masked.T,
             colorscale=cfg.colorscale,
@@ -315,12 +356,12 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
         row=1,
         col=1,
     )
-    fig.update_xaxes(title_text="频率 (Hz)", type=cfg.freq_scale, row=1, col=1)
+    fig.update_xaxes(**ax_opts, row=1, col=1)
     fig.update_yaxes(title_text="时间 (s)", row=1, col=1)
 
     spectrum_db = mean_spectrum(spec, method="median")[fmask] - shift
     fig.add_trace(
-        go.Scatter(x=freqs_masked, y=spectrum_db, mode="lines", name="平均谱", line=dict(color="#7dd3fc")),
+        go.Scatter(x=x_masked, y=spectrum_db, mode="lines", name="平均谱", line=dict(color="#7dd3fc")),
         row=1,
         col=2,
     )
@@ -329,7 +370,7 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
             color = "#ff5c5c" if p.severity == "abnormal" else "#ffb020"
             fig.add_trace(
                 go.Scatter(
-                    x=[p.freq_hz],
+                    x=[float(_x_coords(np.array([p.freq_hz]), cfg)[0])],
                     y=[p.level_db - shift],
                     mode="markers+text",
                     marker=dict(color=color, size=9, symbol="triangle-down"),
@@ -341,7 +382,7 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
                 row=1,
                 col=2,
             )
-    fig.update_xaxes(title_text="频率 (Hz)", type=cfg.freq_scale, row=1, col=2)
+    fig.update_xaxes(**ax_opts, row=1, col=2)
     fig.update_yaxes(title_text=_db_axis_title(cfg).replace("Amplitude ", ""), row=1, col=2)
 
     fig.update_layout(

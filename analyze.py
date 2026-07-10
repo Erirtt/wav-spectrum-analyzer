@@ -62,8 +62,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--annotate", action="store_true", help="在图上叠加异常判定标注（峰值线/图例/结论文字；默认干净视图，判定结论只打印到终端）")
 
     p.add_argument(
-        "--freq-scale", choices=["linear", "log"], default="linear",
-        help="频率轴刻度（默认 linear）。log 会把低频段（常见故障特征频率集中区）拉宽显示，高频段相应压缩",
+        "--freq-scale", choices=["linear", "log", "mel"], default="linear",
+        help="频率轴刻度（默认 linear）。log: 对数轴，低频段拉宽；"
+             "mel: 梅尔刻度（人耳感知），显示层分带即为梅尔频谱。均只影响显示，检测始终用全分辨率线性频率",
     )
     db_group = p.add_mutually_exclusive_group()
     db_group.add_argument(

@@ -35,7 +35,11 @@ class AnalysisConfig:
     max_grid_time: int = 400       # 3D 渲染时时间轴最多点数
     export_png: bool = False       # 是否额外导出 PNG 截图（需要 kaleido，较慢）；默认只生成交互式 HTML
     annotate: bool = False         # 是否在图上叠加异常判定标注（峰值线/图例/结论文字）；默认干净视图
-    freq_scale: str = "linear"     # 频率轴刻度：'linear' 或 'log'（log 更利于观察低频故障特征）
+    # 频率轴刻度（只影响图表显示，检测始终用全分辨率线性频率）：
+    #   'linear': 线性，全频段真实宽度
+    #   'log':    对数，低频段拉宽（常见故障特征频率集中区）
+    #   'mel':    梅尔刻度（人耳感知），显示层分带即为梅尔频谱，低频分辨率高、高频压缩
+    freq_scale: str = "linear"
 
     # dB 显示基准（只影响图表显示，检测判定始终用绝对dBFS计算，不受此项影响）：
     #   'noise_floor' (默认): 相对本底噪声(约10分位数)=0dB，异常峰显示为正数，最直观、类似SNR
