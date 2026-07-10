@@ -12,8 +12,8 @@ class AnalysisConfig:
     window: str = "hann"           # 窗函数，抑制频谱泄漏
 
     # ---- 频率范围（关心的频段）----
-    fmin: Optional[float] = None   # 下限 Hz，None=0
-    fmax: Optional[float] = None   # 上限 Hz，None=Nyquist(fs/2)
+    fmin: Optional[float] = None      # 下限 Hz，None=0
+    fmax: Optional[float] = 10000.0   # 上限 Hz，None=Nyquist(fs/2)；默认只看 10kHz 以内
 
     # ---- 预处理 ----
     remove_dc: bool = True         # 去直流，避免 0Hz 假峰

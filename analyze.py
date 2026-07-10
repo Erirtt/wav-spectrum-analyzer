@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--overlap", type=float, default=0.75, help="帧重叠比例 0~1（默认 0.75）")
     p.add_argument("--window", default="hann", help="窗函数（默认 hann）")
     p.add_argument("--fmin", type=float, default=None, help="关心频段下限 Hz（默认 0）")
-    p.add_argument("--fmax", type=float, default=None, help="关心频段上限 Hz（默认 Nyquist）")
+    p.add_argument("--fmax", type=float, default=10000.0, help="关心频段上限 Hz（默认 10000；想看全频段可设为采样率一半，如 22050）")
     p.add_argument("--channel", default="mean", help="多声道处理: mean 或声道号，如 0（默认 mean）")
 
     p.add_argument("--peak-prominence-db", type=float, default=8.0, help="疑似峰突出度阈值 dB（默认 8）")
@@ -125,12 +125,18 @@ def process_one(path: Path, cfg: AnalysisConfig, out_dir: Path) -> FileReportEnt
     print(f"  采样率={wav.fs}Hz  样本数={wav.n_samples:,}  时长={wav.duration_s:.2f}s  声道数={wav.n_channels}")
 
     try:
-        spec = compute_stft(wav.signal, wav.fs, cfg)
+        spec = compute_stft(wav.signal, wav.fs, cfg)  # 显示用，按 cfg.fmax 裁剪
     except Exception as e:
         print(f"  ✗ STFT 计算失败: {e}", file=sys.stderr)
         return None
 
-    det = detect(spec, cfg)
+    # 检测用比显示宽 5% 的频段，避免恰好在 fmax 边界上的峰漏检；报告仍裁回 fmax
+    if cfg.fmax is not None:
+        det_fmax = min(cfg.fmax * 1.05, wav.fs / 2.0)
+        spec_det = compute_stft(wav.signal, wav.fs, cfg, fmax_override=det_fmax)
+        det = detect(spec_det, cfg, report_fmax=cfg.fmax)
+    else:
+        det = detect(spec, cfg)
     print(f"  结论: [{det.verdict}] {det.summary}")
 
     fig3d = build_3d_figure(wav, spec, det, cfg)

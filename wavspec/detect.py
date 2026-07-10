@@ -113,13 +113,27 @@ def _find_band_energy(freqs: np.ndarray, spectrum_db: np.ndarray, cfg: AnalysisC
     return findings, baseline
 
 
-def detect(spec: Spectrogram, cfg: AnalysisConfig) -> DetectionResult:
-    """在压缩后的平均谱上做峰值检测 + 频带能量检测，汇总结论。"""
+def detect(spec: Spectrogram, cfg: AnalysisConfig, report_fmax: float | None = None) -> DetectionResult:
+    """在压缩后的平均谱上做峰值检测 + 频带能量检测，汇总结论。
+
+    report_fmax: 只报告该频率以下的发现。配合"检测频段比显示频段宽一个余量"
+    使用——恰好落在显示上限附近的峰，其突出度需要右侧数据才能正确计算，
+    检测在宽频段上做、报告时再裁回显示范围，避免边界漏检。
+    """
     spectrum_db = mean_spectrum(spec, method="median")
     baseline = float(np.median(spectrum_db))
 
     peaks = _find_spectral_peaks(spec.freqs, spectrum_db, cfg)
     bands, band_baseline = _find_band_energy(spec.freqs, spectrum_db, cfg)
+
+    if report_fmax is not None:
+        peaks = [p for p in peaks if p.freq_hz <= report_fmax]
+        # 完全在报告范围之外的频带丢弃；跨界的频带把上界裁到 report_fmax
+        bands = [
+            BandFinding(f_lo=b.f_lo, f_hi=min(b.f_hi, report_fmax), level_db=b.level_db,
+                        delta_db=b.delta_db, severity=b.severity)
+            for b in bands if b.f_lo < report_fmax
+        ]
 
     has_abnormal_peak = any(p.severity == "abnormal" for p in peaks)
     has_suspect_peak = any(p.severity == "suspect" for p in peaks)

@@ -215,8 +215,14 @@ class App(tk.Tk):
                 self._log(f"[处理] {wav_path.name}")
                 try:
                     wav = load_wav(wav_path, channel=cfg.channel)
-                    spec = compute_stft(wav.signal, wav.fs, cfg)
-                    det = detect(spec, cfg)
+                    spec = compute_stft(wav.signal, wav.fs, cfg)  # 显示用
+                    # 检测用比显示宽 5% 的频段，避免 fmax 边界上的峰漏检
+                    if cfg.fmax is not None:
+                        det_fmax = min(cfg.fmax * 1.05, wav.fs / 2.0)
+                        spec_det = compute_stft(wav.signal, wav.fs, cfg, fmax_override=det_fmax)
+                        det = detect(spec_det, cfg, report_fmax=cfg.fmax)
+                    else:
+                        det = detect(spec, cfg)
                     fig3d = build_3d_figure(wav, spec, det, cfg)
                     fig_paths = save_figures(fig3d, None, out_dir, stem=wav_path.stem, export_png=False)
                     entries.append(FileReportEntry(wav=wav, det=det, fig_paths=fig_paths))

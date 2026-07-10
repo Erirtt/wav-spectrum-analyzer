@@ -17,8 +17,12 @@ class Spectrogram:
     n_fft: int
 
 
-def compute_stft(sig: np.ndarray, fs: int, cfg: AnalysisConfig) -> Spectrogram:
-    """对信号做预处理 + STFT，返回 dB 表示的频谱矩阵。"""
+def compute_stft(sig: np.ndarray, fs: int, cfg: AnalysisConfig, fmax_override: float | None = None) -> Spectrogram:
+    """对信号做预处理 + STFT，返回 dB 表示的频谱矩阵。
+
+    fmax_override: 覆盖 cfg.fmax 的裁剪上限。检测流程用它取一个比显示范围略宽
+    的频段（如 +5%），避免恰好落在 fmax 边界上的峰因右侧坡被裁掉而漏检。
+    """
     x = sig.copy()
     if cfg.remove_dc:
         x = x - np.mean(x)  # 去直流，否则 0Hz 附近出现巨大假峰
@@ -54,7 +58,8 @@ def compute_stft(sig: np.ndarray, fs: int, cfg: AnalysisConfig) -> Spectrogram:
 
     # 按 fmin/fmax 裁剪频率轴
     fmin = cfg.fmin if cfg.fmin is not None else 0.0
-    fmax = cfg.fmax if cfg.fmax is not None else fs / 2.0
+    cfg_fmax = fmax_override if fmax_override is not None else cfg.fmax
+    fmax = cfg_fmax if cfg_fmax is not None else fs / 2.0
     mask = (freqs >= fmin) & (freqs <= fmax)
     freqs = freqs[mask]
     db = db[mask, :]
