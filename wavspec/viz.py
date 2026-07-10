@@ -150,8 +150,10 @@ def _compute_shift(spec: Spectrogram, cfg: AnalysisConfig) -> float:
 
 
 def _freq_mask(freqs: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
-    """对数频率轴不能显示 0Hz，这里把 DC bin 过滤掉。mel(0)=0 合法，无需过滤。"""
-    if cfg.freq_scale == "log":
+    """log 轴不能显示 0Hz 必须过滤；mel(0)=0 虽合法，但 DC bin 本身也没什么
+    诊断意义（前面已去直流），过滤掉能让梅尔轴从第一个真实频率 bin 开始，
+    和参考图表现一致。"""
+    if cfg.freq_scale in ("log", "mel"):
         return freqs > 0
     return np.ones_like(freqs, dtype=bool)
 
@@ -163,17 +165,31 @@ def _x_coords(freqs_hz: np.ndarray, cfg: AnalysisConfig) -> np.ndarray:
     return freqs_hz
 
 
-def _freq_axis_opts(cfg: AnalysisConfig, f_lo: float, f_hi: float) -> dict:
-    """频率轴配置。Plotly 无原生 mel 轴：mel 模式下 x 坐标是梅尔值，
-    刻度位置取整数 Hz 的梅尔坐标、标签显示 Hz，读图体验与真实 mel 轴一致。"""
+def _format_hz_label(hz: float) -> str:
+    """1400 -> '1.4k'，10000 -> '10k'，525 -> '525'。"""
+    if hz >= 1000:
+        s = f"{hz / 1000:.1f}"
+        if s.endswith(".0"):
+            s = s[:-2]
+        return f"{s}k"
+    return f"{round(hz)}"
+
+
+def _freq_axis_opts(cfg: AnalysisConfig, f_lo: float, f_hi: float, n_ticks: int = 6) -> dict:
+    """频率轴配置。Plotly 无原生 mel 轴：mel 模式下 x 坐标是梅尔值。
+
+    刻度在梅尔域【等间隔】布置（而不是选好看的整数Hz再换算位置），换回 Hz 做
+    标签——这样刻度线间距在视觉上是真正均匀的，代价是标签变成非整数(如1.4k、
+    2.9k)。这是梅尔轴的标准呈现方式：每一格代表人耳感知上相等的"一步"。
+    """
     if cfg.freq_scale == "mel":
-        candidates = [0, 50, 100, 200, 500, 1000, 2000, 4000, 8000, 16000, 20000]
-        ticks = [f for f in candidates if f_lo <= f <= f_hi]
-        labels = [f"{f/1000:g}k" if f >= 1000 else str(f) for f in ticks]
+        mel_ticks = np.linspace(_hz_to_mel(f_lo), _hz_to_mel(f_hi), n_ticks)
+        hz_ticks = _mel_to_hz(mel_ticks)
+        labels = [_format_hz_label(hz) for hz in hz_ticks]
         return dict(
             title="频率 Frequency (Hz, Mel刻度)",
             type="linear",
-            tickvals=_hz_to_mel(np.array(ticks, dtype=float)).tolist(),
+            tickvals=mel_ticks.tolist(),
             ticktext=labels,
         )
     return dict(title="频率 Frequency (Hz)", type=cfg.freq_scale)
