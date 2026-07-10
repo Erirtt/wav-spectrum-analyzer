@@ -40,7 +40,11 @@ def compute_stft(sig: np.ndarray, fs: int, cfg: AnalysisConfig, fmax_override: f
         window=cfg.window,
         nperseg=n_fft,
         noverlap=noverlap,
-        boundary=None,
+        # boundary='zeros': 首尾各做半窗零延拓，让第一/最后一帧的窗峰对齐到
+        # 文件真实的起止点。boundary=None 时首帧从 t=0 起，Hann 窗在起点为0，
+        # 紧贴文件开头的瞬态会被窗形本身压低几十dB(实测: 中间-24dB时开头-55dB)，
+        # 结尾也有同样但较轻的衰减；'zeros' 让两端都吃到窗的中心(峰值)权重。
+        boundary="zeros",
         padded=True,  # 末尾补零到整帧：文件最后 <1 hop 的样本不会被静默丢弃
     )
 
