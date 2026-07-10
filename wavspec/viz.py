@@ -53,11 +53,25 @@ def _mel_to_hz(m):
     return 700.0 * (10.0 ** (np.asarray(m, dtype=float) / 2595.0) - 1.0)
 
 
-def _downsample_grid(n: int, max_n: int) -> np.ndarray:
-    """返回长度不超过 max_n 的抽稀索引（均匀间隔），用于渲染前的降采样。"""
-    if n <= max_n:
-        return np.arange(n)
-    return np.linspace(0, n - 1, max_n).astype(int)
+def _blockmax_downsample(
+    freqs: np.ndarray, times: np.ndarray, db: np.ndarray, max_f: int, max_t: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """保峰降采样：每个显示块取块内最大 dB（峰值保持，类似频谱仪的 peak-hold）。
+
+    单纯抽稀(每隔N取1)可能恰好跳过峰顶 bin，让峰在图上损失几 dB；
+    块内取最大保证任何峰的顶点都会被显示出来，代价是本底噪声略被抬高
+    (块内最大≥块内均值)——用于"未平滑"检视模式，这个取舍是合适的。
+    """
+    nf = min(max_f, len(freqs))
+    nt = min(max_t, len(times))
+    f_edges = np.linspace(0, len(freqs), nf + 1).astype(int)
+    t_edges = np.linspace(0, len(times), nt + 1).astype(int)
+    # reduceat 要求严格递增的起点；min() 保证了每块至少 1 个元素
+    db_f = np.maximum.reduceat(db, f_edges[:-1], axis=0)
+    db_ft = np.maximum.reduceat(db_f, t_edges[:-1], axis=1)
+    freqs_d = np.array([freqs[f_edges[i]:f_edges[i + 1]].mean() for i in range(nf)])
+    times_d = np.array([times[t_edges[i]:t_edges[i + 1]].mean() for i in range(nt)])
+    return freqs_d, times_d, db_ft
 
 
 def _aggregate_for_display(
@@ -107,10 +121,16 @@ def _aggregate_for_display(
         nearest = np.clip(nearest, 0, len(freqs) - 1)
         p_ft[empty] = p_t[nearest]
 
+    # 高斯平滑必须在【功率域】做（转 dB 之前）：
+    # dB 是对数域，在 dB 上做加权平均等价于线性域的几何平均——窄带峰会被周围
+    # 接近 floor(-120dB) 的值拉低几十 dB（实测满幅正弦 0dBFS 被压到 -49dBFS），
+    # 这是数学伪影不是物理平滑。功率域卷积则是能量守恒的扩散：峰适度展宽、
+    # 峰顶只降几 dB（能量转移到相邻显示单元），物理意义等同于加宽分析带宽。
+    if cfg.smooth_sigma > 0:
+        p_ft = gaussian_filter(p_ft, sigma=cfg.smooth_sigma)
+
     floor_p = 10.0 ** (cfg.floor_db / 10.0)
     db_d = 10.0 * np.log10(np.maximum(p_ft, floor_p))
-    if cfg.smooth_sigma > 0:
-        db_d = gaussian_filter(db_d, sigma=cfg.smooth_sigma)
     return centers, times_d, db_d
 
 
@@ -220,12 +240,10 @@ def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
         # 能量域块平均聚合：平滑、能量守恒（参考图的平滑来源）
         freqs_ds, times_ds, db_ds = _aggregate_for_display(freqs_masked, spec.times, db_masked, cfg)
     else:
-        # 原始抽稀：保留每个被选中 bin 的原值，毛躁但无任何加工
-        f_idx = _downsample_grid(len(freqs_masked), cfg.max_grid_freq)
-        t_idx = _downsample_grid(len(spec.times), cfg.max_grid_time)
-        freqs_ds = freqs_masked[f_idx]
-        times_ds = spec.times[t_idx]
-        db_ds = db_masked[np.ix_(f_idx, t_idx)]  # shape (F_ds, T_ds)
+        # 保峰降采样(块内取最大)：任何峰顶都不会因降采样而丢失
+        freqs_ds, times_ds, db_ds = _blockmax_downsample(
+            freqs_masked, spec.times, db_masked, cfg.max_grid_freq, cfg.max_grid_time
+        )
 
     db_ds = db_ds - shift  # 聚合完成后再平移到目标显示基准
 
@@ -234,10 +252,14 @@ def build_3d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
 
     cmin, cmax = _robust_color_range(db_ds)
     db_title = _colorbar_title(cfg)
+    # 悬停始终显示真实 Hz（mel 模式下 x 坐标是内部梅尔值，不加 customdata 悬停会读成梅尔数）
+    hz_grid = np.tile(freqs_ds, (len(times_ds), 1))  # shape 同 z: (T_ds, F_ds)
     surface = go.Surface(
         x=_x_coords(freqs_ds, cfg),
         y=times_ds,
         z=db_ds.T,  # z 需要 shape (len(y), len(x)) = (T_ds, F_ds)
+        customdata=hz_grid,
+        hovertemplate="频率: %{customdata:.0f} Hz<br>时间: %{y:.3f} s<br>幅值: %{z:.1f} dB<extra></extra>",
         colorscale=cfg.colorscale,
         cmin=cmin,
         cmax=cmax,
@@ -364,6 +386,8 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
             x=x_masked,
             y=spec.times,
             z=db_masked.T,
+            customdata=np.tile(freqs_masked, (len(spec.times), 1)),
+            hovertemplate="频率: %{customdata:.0f} Hz<br>时间: %{y:.3f} s<br>幅值: %{z:.1f} dB<extra></extra>",
             colorscale=cfg.colorscale,
             zmin=cmin,
             zmax=cmax,
@@ -377,7 +401,15 @@ def build_2d_figure(wav: WavData, spec: Spectrogram, det: DetectionResult, cfg: 
 
     spectrum_db = mean_spectrum(spec, method="median")[fmask] - shift
     fig.add_trace(
-        go.Scatter(x=x_masked, y=spectrum_db, mode="lines", name="平均谱", line=dict(color="#7dd3fc")),
+        go.Scatter(
+            x=x_masked,
+            y=spectrum_db,
+            mode="lines",
+            name="平均谱",
+            line=dict(color="#7dd3fc"),
+            customdata=freqs_masked,
+            hovertemplate="频率: %{customdata:.0f} Hz<br>幅值: %{y:.1f} dB<extra></extra>",
+        ),
         row=1,
         col=2,
     )

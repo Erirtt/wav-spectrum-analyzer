@@ -41,7 +41,7 @@ def compute_stft(sig: np.ndarray, fs: int, cfg: AnalysisConfig, fmax_override: f
         nperseg=n_fft,
         noverlap=noverlap,
         boundary=None,
-        padded=False,
+        padded=True,  # 末尾补零到整帧：文件最后 <1 hop 的样本不会被静默丢弃
     )
 
     mag = np.abs(Zxx)
